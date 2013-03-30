@@ -3,10 +3,10 @@
 #include <leveldb/env.h>
 #include <leveldb/options.h>
 #include <iostream>
-#include <boost/algorithm/string/erase.hpp>
+#include <boost/filesystem/path.hpp>
 
 using namespace std;
-using boost::algorithm::erase_first;
+using boost::filesystem::path;
 
 static leveldb::Status IOError(const std::string& context, int err_number) {
   return leveldb::Status::IOError(context, strerror(err_number));
@@ -184,9 +184,8 @@ private:
     for (librados::ObjectIterator it = ctx_.objects_begin(); it != ctx_.objects_end(); ++it)
     {
       const std::pair<std::string, std::string>& cur = *it;
-      std::string path = cur.first;
-      erase_first(path, dir + "/");
-      result->push_back(path);
+      const path p(cur.first);
+      result->push_back(p.filename().string());
     }
 
     return leveldb::Status::OK();
