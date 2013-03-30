@@ -180,10 +180,9 @@ private:
     for (librados::ObjectIterator it = ctx_.objects_begin(); it != ctx_.objects_end(); ++it)
     {
       const std::pair<std::string, std::string>& cur = *it;
-      cerr << "Child: " << cur.first << " : " << cur.second << endl;
       std::string path = cur.first;
-      erase_first(path, dir);
-      result->push_back(cur.first);
+      erase_first(path, dir + "/");
+      result->push_back(path);
     }
 
     return leveldb::Status::OK();
