@@ -8,6 +8,10 @@
 using namespace std;
 using boost::algorithm::erase_first;
 
+static leveldb::Status IOError(const std::string& context, int err_number) {
+  return leveldb::Status::IOError(context, strerror(err_number));
+}
+
 class RadosSequentialFile : public leveldb::SequentialFile
 {
 public:
@@ -25,7 +29,7 @@ private:
     const int r = ctx_.read(fname_, bl, n, off_);
     if (r < 0)
     {
-       return leveldb::Status::IOError("RadosSequentialFile::Read: some error");
+       return IOError("RadosSequentialFile::Read: " + fname_, -r);
     }
 
     bl.copy(0, r, scratch);
@@ -65,7 +69,7 @@ private:
     const int r = ctx_.read(fname_, bl, n, offset);
     if (r < 0)
     {
-       return leveldb::Status::IOError("RadosRandomAccessFile::Read: some error");
+       return IOError("RadosRandomAccessFile::Read: " + fname_, -r);
     }
 
     bl.copy(0, r, scratch);
@@ -97,7 +101,7 @@ private:
     int err = ctx_.append(fname_, bl, data.size());
     if (err < 0)
     {
-      return leveldb::Status::IOError(string("RadosWriteableFile/Append: ") + fname_ + strerror(-err));
+      return IOError(string("RadosWriteableFile/Append: ") + fname_, -err);
     }
 
     return leveldb::Status::OK();
@@ -153,7 +157,7 @@ private:
     int err = ctx_.create(fname, true);
     if (err < 0)
     {
-      return leveldb::Status::IOError(string("NewWritableFile: ") + fname + " " + strerror(-err));
+      return IOError("NewWritableFile: " + fname, -err);
     }
 
     *result = new RadosWritableFile(ctx_, fname);
@@ -176,7 +180,7 @@ private:
 
   virtual leveldb::Status GetChildren(const std::string& dir, std::vector<std::string>* result)
   {
-    result->resize(0);
+    result->clear();
     for (librados::ObjectIterator it = ctx_.objects_begin(); it != ctx_.objects_end(); ++it)
     {
       const std::pair<std::string, std::string>& cur = *it;
@@ -190,9 +194,10 @@ private:
 
   virtual leveldb::Status DeleteFile(const std::string& fname)
   {
-    if (ctx_.remove(fname) < 0)
+    int err = ctx_.remove(fname);
+    if (err < 0)
     {
-      return leveldb::Status::IOError("DeleteFile: some error");
+      return IOError("DeleteFile: " + fname, -err);
     }
 
     return leveldb::Status::OK();
@@ -210,11 +215,12 @@ private:
 
   virtual leveldb::Status GetFileSize(const std::string& fname, uint64_t* file_size)
   {
-    size_t size;
-    time_t mtime;
-    if (ctx_.stat(fname, &size, &mtime) < 0)
+    size_t size = 0;
+    time_t mtime = 0;
+    int err = ctx_.stat(fname, &size, &mtime);
+    if (err < 0)
     {
-      return leveldb::Status::IOError("GetFileSize: some error");
+      return IOError("GetFileSize/stat: " + fname, -err);
     }
 
     *file_size = static_cast<uint64_t>(size);
@@ -224,19 +230,32 @@ private:
 
   virtual leveldb::Status RenameFile(const std::string& src, const std::string& target) 
   {
-    size_t size;
-    time_t mtime;
-    if (ctx_.stat(src, &size, &mtime) < 0)
+    size_t size = 0;
+    time_t mtime = 0;
+    int err = ctx_.stat(src, &size, &mtime);
+    if (err < 0)
     {
-      return leveldb::Status::IOError("RenameFile/stat: some error");
+      return IOError("RenameFile/stat: " + src, -err);
     }
 
-    cerr << size << " " << mtime << endl;
-
     librados::bufferlist bl;
-    ctx_.read(src, bl, size, 0);
-    ctx_.write_full(target, bl);
-    ctx_.remove(src);
+    err = ctx_.read(src, bl, size, 0);
+    if (err < 0)
+    {
+      return IOError("RenameFile/read: " + src, -err);
+    }
+
+    err = ctx_.write_full(target, bl);
+    if (err < 0)
+    {
+      return IOError("RenameFile/write_full: " + target, -err);
+    }
+
+    err = ctx_.remove(src);
+    if (err < 0)
+    {
+      return IOError("RenameFile/remove: " + src, -err);
+    }
 
 #if 0
     int err = ctx_.clone_range(target, 0, src, 0, size);
@@ -276,14 +295,37 @@ private:
 
 int main()
 {
+  int err;
   librados::Rados rados;
   // rados.init("/etc/ceph/ceph.conf");
-  rados.init(NULL);
-  rados.conf_read_file("/etc/ceph/ceph.conf");
-  rados.connect();
+  err = rados.init(NULL);
+  if (err < 0)
+  {
+    cerr << "Rados::init() failed: " << strerror(-err);
+    return 1;
+  }
+
+  err = rados.conf_read_file("/etc/ceph/ceph.conf");
+  if (err < 0)
+  {
+    cerr << "Rados::conf_read_file() failed: " << strerror(-err);
+    return 1;
+  }
+
+  err = rados.connect();
+  if (err < 0)
+  {
+    cerr << "Rados::connect() failed: " << strerror(-err);
+    return 1;
+  }
 
   librados::IoCtx ioctx;
-  rados.ioctx_create("leveldb", ioctx);
+  err = rados.ioctx_create("leveldb", ioctx);
+  if (err < 0)
+  {
+    cerr << "Rados::ioctx_create() failed: " << strerror(-err);
+    return 1;
+  }
 
   RadosEnv env(ioctx);
 
@@ -319,14 +361,14 @@ int main()
 
   delete db;
 
-  #if 0
+#if 0
   librados::ObjectReadOperation oro;
   librados::bufferlist bl;
   oro.read(0, 4, &bl, NULL);
   ioctx.operate("test", &oro, NULL);
 
   cout << bl << endl;
-  #endif
+#endif
 
   return 0;
 }
