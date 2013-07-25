@@ -3,6 +3,7 @@
 #include <leveldb/env.h>
 #include <leveldb/options.h>
 #include <iostream>
+#include <memory>
 #include <boost/filesystem/path.hpp>
 
 using namespace std;
@@ -96,14 +97,17 @@ public:
 private:
   virtual leveldb::Status Append(const leveldb::Slice& data)
   {
+    // copy the data into a Rados bufferlist then queue an append
     librados::bufferlist bl;
-    bl.push_back(ceph::buffer::ptr(data.data(), data.size()));
-    int err = ctx_.append(fname_, bl, data.size());
+    bl.append(data.data(), data.size());
+    std::auto_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
+    int err = ctx_.aio_append(fname_, c.get(), bl, data.size());
     if (err < 0)
     {
-      return IOError(string("RadosWriteableFile/Append: ") + fname_, -err);
+      return IOError("RadosWriteableFile/Append: " + fname_, -err);
     }
 
+    c.release();
     return leveldb::Status::OK();
   }
 
@@ -115,13 +119,27 @@ private:
 
   virtual leveldb::Status Flush()
   {
-    // nop
+    return Sync();
+#if 0 // should be in the next release post bobtail
+    boost::shared_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
+    int err = ctx_.aio_flush_async(c);
+    if (err < 0)
+    {
+      return IOError("RadosWriteableFile/Flush: " + fname_, -err);
+    }
+
     return leveldb::Status::OK();
+#endif
   }
 
   virtual leveldb::Status Sync()
   {
-    // nop
+    int err = ctx_.aio_flush();
+    if (err < 0)
+    {
+      return IOError("RadosWriteableFile/Sync: " + fname_, -err);
+    }
+
     return leveldb::Status::OK();
   }
 
@@ -255,14 +273,6 @@ private:
     {
       return IOError("RenameFile/remove: " + src, -err);
     }
-
-#if 0
-    int err = ctx_.clone_range(target, 0, src, 0, size);
-    if (err < 0)
-    {
-      // return leveldb::Status::IOError(string("RenameFile/clone_range: ") + src + " " + target + " " + strerror(-err));
-    }
-#endif
 
     return leveldb::Status::OK();
   }
