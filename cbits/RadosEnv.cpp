@@ -5,6 +5,9 @@
 #include <iostream>
 #include <memory>
 #include <boost/filesystem/path.hpp>
+#include <boost/make_shared.hpp>
+
+#include "RadosEnv.h"
 
 using namespace std;
 using boost::filesystem::path;
@@ -16,7 +19,7 @@ static leveldb::Status IOError(const std::string& context, int err_number) {
 class RadosSequentialFile : public leveldb::SequentialFile
 {
 public:
-  RadosSequentialFile(librados::IoCtx ctx, const std::string& fname)
+  RadosSequentialFile(const boost::shared_ptr<librados::IoCtx>& ctx, const std::string& fname)
     : ctx_(ctx)
     , fname_(fname)
     , off_(0)
@@ -27,7 +30,7 @@ private:
   virtual leveldb::Status Read(size_t n, leveldb::Slice* result, char* scratch)
   {
     librados::bufferlist bl;
-    const int r = ctx_.read(fname_, bl, n, off_);
+    const int r = ctx_->read(fname_, bl, n, off_);
     if (r < 0)
     {
        return IOError("RadosSequentialFile::Read: " + fname_, -r);
@@ -49,7 +52,7 @@ private:
   }
 
 private:
-  librados::IoCtx ctx_;
+  const boost::shared_ptr<librados::IoCtx> ctx_;
   const std::string fname_;
   uint64_t off_;
 };
@@ -57,7 +60,7 @@ private:
 class RadosRandomAccessFile : public leveldb::RandomAccessFile
 {
 public:
-  RadosRandomAccessFile(librados::IoCtx ctx, const std::string& fname)
+  RadosRandomAccessFile(const boost::shared_ptr<librados::IoCtx>& ctx, const std::string& fname)
     : ctx_(ctx)
     , fname_(fname)
   {
@@ -67,7 +70,7 @@ private:
   virtual leveldb::Status Read(uint64_t offset, size_t n, leveldb::Slice* result, char* scratch) const
   {
     librados::bufferlist bl;
-    const int r = ctx_.read(fname_, bl, n, offset);
+    const int r = ctx_->read(fname_, bl, n, offset);
     if (r < 0)
     {
        return IOError("RadosRandomAccessFile::Read: " + fname_, -r);
@@ -81,14 +84,14 @@ private:
   }
 
 private:
-  mutable librados::IoCtx ctx_;
+  const boost::shared_ptr<librados::IoCtx> ctx_;
   const std::string fname_;
 };
 
 class RadosWritableFile : public leveldb::WritableFile
 {
 public:
-  RadosWritableFile(librados::IoCtx ctx, const std::string& fname)
+  RadosWritableFile(const boost::shared_ptr<librados::IoCtx>& ctx, const std::string& fname)
     : ctx_(ctx)
     , fname_(fname)
   {
@@ -101,7 +104,7 @@ private:
     librados::bufferlist bl;
     bl.append(data.data(), data.size());
     std::auto_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
-    int err = ctx_.aio_append(fname_, c.get(), bl, data.size());
+    int err = ctx_->aio_append(fname_, c.get(), bl, data.size());
     if (err < 0)
     {
       return IOError("RadosWriteableFile/Append: " + fname_, -err);
@@ -122,7 +125,7 @@ private:
     return Sync();
 #if 0 // should be in the next release post bobtail
     boost::shared_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
-    int err = ctx_.aio_flush_async(c);
+    int err = ctx_->aio_flush_async(c);
     if (err < 0)
     {
       return IOError("RadosWriteableFile/Flush: " + fname_, -err);
@@ -134,7 +137,7 @@ private:
 
   virtual leveldb::Status Sync()
   {
-    int err = ctx_.aio_flush();
+    int err = ctx_->aio_flush();
     if (err < 0)
     {
       return IOError("RadosWriteableFile/Sync: " + fname_, -err);
@@ -144,15 +147,16 @@ private:
   }
 
 private:
-  librados::IoCtx ctx_;
+  const boost::shared_ptr<librados::IoCtx> ctx_;
   const std::string fname_;
 };
 
 class RadosEnv : public leveldb::EnvWrapper
 {
 public:
-  RadosEnv(const librados::IoCtx& ctx)
+  RadosEnv(const boost::shared_ptr<void>& parent, const boost::shared_ptr<librados::IoCtx>& ctx)
     : leveldb::EnvWrapper(Env::Default())
+    , parent_(parent)
     , ctx_(ctx)
   {
   }
@@ -172,7 +176,7 @@ private:
 
   virtual leveldb::Status NewWritableFile(const std::string& fname, leveldb::WritableFile** result)
   {
-    int err = ctx_.create(fname, true);
+    int err = ctx_->create(fname, true);
     if (err < 0)
     {
       return IOError("NewWritableFile: " + fname, -err);
@@ -186,7 +190,7 @@ private:
   {
     size_t size = 0;
     time_t mtime = 0;
-    if (ctx_.stat(fname, &size, &mtime) < 0)
+    if (ctx_->stat(fname, &size, &mtime) < 0)
     {
       return false;
     }
@@ -199,7 +203,7 @@ private:
   virtual leveldb::Status GetChildren(const std::string& dir, std::vector<std::string>* result)
   {
     result->clear();
-    for (librados::ObjectIterator it = ctx_.objects_begin(); it != ctx_.objects_end(); ++it)
+    for (librados::ObjectIterator it = ctx_->objects_begin(); it != ctx_->objects_end(); ++it)
     {
       const std::pair<std::string, std::string>& cur = *it;
       const path p(cur.first);
@@ -211,7 +215,7 @@ private:
 
   virtual leveldb::Status DeleteFile(const std::string& fname)
   {
-    int err = ctx_.remove(fname);
+    int err = ctx_->remove(fname);
     if (err < 0)
     {
       return IOError("DeleteFile: " + fname, -err);
@@ -234,7 +238,7 @@ private:
   {
     size_t size = 0;
     time_t mtime = 0;
-    int err = ctx_.stat(fname, &size, &mtime);
+    int err = ctx_->stat(fname, &size, &mtime);
     if (err < 0)
     {
       return IOError("GetFileSize/stat: " + fname, -err);
@@ -245,30 +249,30 @@ private:
     return leveldb::Status::OK();
   }
 
-  virtual leveldb::Status RenameFile(const std::string& src, const std::string& target) 
+  virtual leveldb::Status RenameFile(const std::string& src, const std::string& target)
   {
     size_t size = 0;
     time_t mtime = 0;
-    int err = ctx_.stat(src, &size, &mtime);
+    int err = ctx_->stat(src, &size, &mtime);
     if (err < 0)
     {
       return IOError("RenameFile/stat: " + src, -err);
     }
 
     librados::bufferlist bl;
-    err = ctx_.read(src, bl, size, 0);
+    err = ctx_->read(src, bl, size, 0);
     if (err < 0)
     {
       return IOError("RenameFile/read: " + src, -err);
     }
 
-    err = ctx_.write_full(target, bl);
+    err = ctx_->write_full(target, bl);
     if (err < 0)
     {
       return IOError("RenameFile/write_full: " + target, -err);
     }
 
-    err = ctx_.remove(src);
+    err = ctx_->remove(src);
     if (err < 0)
     {
       return IOError("RenameFile/remove: " + src, -err);
@@ -299,44 +303,48 @@ private:
   }
 
 private:
-  librados::IoCtx ctx_;
+  boost::shared_ptr<librados::IoCtx> ctx_;
+  const boost::shared_ptr<void> parent_;
 };
 
+#if 0
 int main()
 {
   int err;
-  librados::Rados rados;
+  boost::shared_ptr<librados::Rados> rados(new librados::Rados());
   // rados.init("/etc/ceph/ceph.conf");
-  err = rados.init(NULL);
+  err = rados->init(NULL);
   if (err < 0)
   {
     cerr << "Rados::init() failed: " << strerror(-err);
     return 1;
   }
 
-  err = rados.conf_read_file("/etc/ceph/ceph.conf");
+  err = rados->conf_read_file("/etc/ceph/ceph.conf");
   if (err < 0)
   {
     cerr << "Rados::conf_read_file() failed: " << strerror(-err);
     return 1;
   }
 
-  err = rados.connect();
+  err = rados->connect();
   if (err < 0)
   {
     cerr << "Rados::connect() failed: " << strerror(-err);
     return 1;
   }
 
-  librados::IoCtx ioctx;
-  err = rados.ioctx_create("leveldb", ioctx);
+  librados::IoCtx c;
+  err = rados->ioctx_create("leveldb", c);
   if (err < 0)
   {
     cerr << "Rados::ioctx_create() failed: " << strerror(-err);
     return 1;
   }
 
-  RadosEnv env(ioctx);
+  boost::shared_ptr<librados::IoCtx> ioctx(boost::make_shared<librados::IoCtx>(c));
+
+  RadosEnv env(rados, ioctx);
 
   leveldb::Options options;
   options.create_if_missing = true;
@@ -380,4 +388,55 @@ int main()
 #endif
 
   return 0;
+}
+#endif
+
+// sadly this is internal to LevelDB
+struct leveldb_env_t
+{
+  leveldb::Env* rep;
+  bool is_default;
+};
+
+leveldb_env_t* leveldb_create_rados_env(const char* config_file, const char* pool_name)
+{
+  int err;
+  boost::shared_ptr<librados::Rados> rados(new librados::Rados());
+  err = rados->init(NULL);
+  if (err < 0)
+  {
+    cerr << "Rados::init() failed: " << strerror(-err);
+    return NULL;
+  }
+
+  err = rados->conf_read_file(config_file);
+  if (err < 0)
+  {
+    cerr << "Rados::conf_read_file() failed: " << strerror(-err);
+    return NULL;
+  }
+
+  err = rados->connect();
+  if (err < 0)
+  {
+    cerr << "Rados::connect() failed: " << strerror(-err);
+    return NULL;
+  }
+
+  librados::IoCtx c;
+  err = rados->ioctx_create("leveldb", c);
+  if (err < 0)
+  {
+    cerr << "Rados::ioctx_create() failed: " << strerror(-err);
+    return NULL;
+  }
+
+  boost::shared_ptr<librados::IoCtx> ioctx(boost::make_shared<librados::IoCtx>(c));
+
+  RadosEnv env(rados, ioctx);
+
+  leveldb_env_t* result = new leveldb_env_t;
+  result->rep = new RadosEnv(rados, ioctx);
+  result->is_default = false;
+  return result;
 }
