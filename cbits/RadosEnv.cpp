@@ -120,19 +120,24 @@ private:
     return leveldb::Status::OK();
   }
 
+  static void FreeAioCompletion(librados::completion_t cb, void* arg)
+  {
+    static_cast<librados::AioCompletion*>(arg)->release();
+  }
+
   virtual leveldb::Status Flush()
   {
-    return Sync();
-#if 0 // should be in the next release post bobtail
-    boost::shared_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
-    int err = ctx_->aio_flush_async(c);
+    std::auto_ptr<librados::AioCompletion> c(librados::Rados::aio_create_completion());
+    c->set_complete_callback(c.get(), FreeAioCompletion);
+    int err = ctx_->aio_flush_async(c.get());
     if (err < 0)
     {
       return IOError("RadosWriteableFile/Flush: " + fname_, -err);
     }
 
+    c.release();
+
     return leveldb::Status::OK();
-#endif
   }
 
   virtual leveldb::Status Sync()
@@ -283,6 +288,7 @@ private:
 
   virtual leveldb::Status LockFile(const std::string& fname, leveldb::FileLock** lock)
   {
+    // @TODO: use lock_exclusive/unlock when we upgrade to dumpling
     *lock = new leveldb::FileLock();
 
     return leveldb::Status::OK();
@@ -303,93 +309,9 @@ private:
   }
 
 private:
-  boost::shared_ptr<librados::IoCtx> ctx_;
+  const boost::shared_ptr<librados::IoCtx> ctx_;
   const boost::shared_ptr<void> parent_;
 };
-
-#if 0
-int main()
-{
-  int err;
-  boost::shared_ptr<librados::Rados> rados(new librados::Rados());
-  // rados.init("/etc/ceph/ceph.conf");
-  err = rados->init(NULL);
-  if (err < 0)
-  {
-    cerr << "Rados::init() failed: " << strerror(-err);
-    return 1;
-  }
-
-  err = rados->conf_read_file("/etc/ceph/ceph.conf");
-  if (err < 0)
-  {
-    cerr << "Rados::conf_read_file() failed: " << strerror(-err);
-    return 1;
-  }
-
-  err = rados->connect();
-  if (err < 0)
-  {
-    cerr << "Rados::connect() failed: " << strerror(-err);
-    return 1;
-  }
-
-  librados::IoCtx c;
-  err = rados->ioctx_create("leveldb", c);
-  if (err < 0)
-  {
-    cerr << "Rados::ioctx_create() failed: " << strerror(-err);
-    return 1;
-  }
-
-  boost::shared_ptr<librados::IoCtx> ioctx(boost::make_shared<librados::IoCtx>(c));
-
-  RadosEnv env(rados, ioctx);
-
-  leveldb::Options options;
-  options.create_if_missing = true;
-  options.env = &env;
-
-  leveldb::Status s;
-  leveldb::DB* db;
-  s = leveldb::DB::Open(options, "dbname", &db);
-  if (!s.ok())
-  {
-    cerr << s.ToString() << endl;
-    return 1;
-  }
-
-  s = db->Put(leveldb::WriteOptions(), "key", "value");
-  if (!s.ok())
-  {
-    cerr << s.ToString() << endl;
-    return 1;
-  }
-
-  std::string val;
-  s = db->Get(leveldb::ReadOptions(), "key", &val);
-  if (!s.ok())
-  {
-    cerr << s.ToString() << endl;
-    return 1;
-  }
-
-  db->CompactRange(NULL, NULL);
-
-  delete db;
-
-#if 0
-  librados::ObjectReadOperation oro;
-  librados::bufferlist bl;
-  oro.read(0, 4, &bl, NULL);
-  ioctx.operate("test", &oro, NULL);
-
-  cout << bl << endl;
-#endif
-
-  return 0;
-}
-#endif
 
 // sadly this is internal to LevelDB
 struct leveldb_env_t
